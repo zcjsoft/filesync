@@ -228,45 +228,115 @@ class FileSync:
             return False
     
     def get_target_path(self, server_path):
-        """根据服务端路径计算客户端目标路径"""
-        # 移除服务端根目录前缀
-        if server_path.startswith(self.server_root):
-            relative_path = server_path[len(self.server_root):]
-            # 确保相对路径不包含前导斜杠
-            if relative_path.startswith('\\') or relative_path.startswith('/'):
-                relative_path = relative_path[1:]
-        else:
-            # 如果路径不包含服务端根目录，直接使用文件名
-            relative_path = os.path.basename(server_path)
-        
-        # 构建目标路径
-        target_path = os.path.join(self.target_dir, relative_path)
-        
-        return target_path
+        """根据服务端路径计算客户端目标路径，处理特殊字符"""
+        try:
+            # 规范化路径，确保使用正确的路径分隔符
+            normalized_server_path = os.path.normpath(server_path)
+            normalized_server_root = os.path.normpath(self.server_root)
+            
+            # 移除服务端根目录前缀
+            if normalized_server_path.startswith(normalized_server_root):
+                relative_path = normalized_server_path[len(normalized_server_root):]
+                # 确保相对路径不包含前导斜杠
+                if relative_path.startswith(os.sep):
+                    relative_path = relative_path[1:]
+            else:
+                # 如果路径不包含服务端根目录，直接使用文件名
+                relative_path = os.path.basename(normalized_server_path)
+            
+            # 构建目标路径
+            target_path = os.path.join(self.target_dir, relative_path)
+            
+            # 确保目标路径是绝对路径
+            target_path = os.path.abspath(target_path)
+            
+            return target_path
+        except Exception as e:
+            print(f"Error calculating target path for {server_path}: {e}")
+            # 如果计算失败，使用基本方法
+            return os.path.join(self.target_dir, os.path.basename(server_path))
     
+    def _should_skip_file(self, file_path):
+        """检查是否需要跳过此文件（权限问题等）"""
+        try:
+            # 检查文件是否存在
+            if not os.path.exists(file_path):
+                return False
+            
+            # 检查文件是否可读
+            if not os.access(file_path, os.R_OK):
+                return True
+            
+            # 检查文件是否被其他进程锁定（Windows特有）
+            if os.name == 'nt':  # Windows系统
+                try:
+                    # 尝试以只读方式打开文件，检查是否被锁定
+                    with open(file_path, 'rb') as f:
+                        pass
+                except PermissionError:
+                    return True
+                except OSError:
+                    return True
+            
+            return False
+        except Exception:
+            # 如果检查过程中出现任何异常，跳过此文件
+            return True
+
     def _copy_file_with_progress(self, src, dst, buffer_size=8192):
         """带进度显示的文件复制，避免大文件内存问题"""
         try:
+            # 检查源文件是否存在
+            if not os.path.exists(src):
+                print(f"Source file not found: {src}")
+                return False
+            
+            # 检查源文件是否可读
+            if not os.access(src, os.R_OK):
+                print(f"No read permission for source file: {src}")
+                return False
+            
+            # 检查目标目录是否可写
+            target_dir = os.path.dirname(dst)
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir, exist_ok=True)
+            
+            if not os.access(target_dir, os.W_OK):
+                print(f"No write permission for target directory: {target_dir}")
+                return False
+            
             file_size = os.path.getsize(src)
             copied = 0
             
-            with open(src, 'rb') as src_file:
-                with open(dst, 'wb') as dst_file:
-                    while True:
-                        buffer = src_file.read(buffer_size)
-                        if not buffer:
-                            break
-                        dst_file.write(buffer)
-                        copied += len(buffer)
-                        
-                        # 显示大文件复制进度
-                        if file_size > 1024 * 1024:  # 大于1MB的文件显示进度
-                            percentage = (copied / file_size) * 100
-                            print(f"\rCopying {os.path.basename(src)}: {copied/1024/1024:.1f}MB/{file_size/1024/1024:.1f}MB ({percentage:.1f}%)", 
-                                  end="", flush=True)
+            # 尝试以不同方式打开文件，处理权限问题
+            try:
+                with open(src, 'rb') as src_file:
+                    with open(dst, 'wb') as dst_file:
+                        while True:
+                            buffer = src_file.read(buffer_size)
+                            if not buffer:
+                                break
+                            dst_file.write(buffer)
+                            copied += len(buffer)
+                            
+                            # 显示大文件复制进度
+                            if file_size > 1024 * 1024:  # 大于1MB的文件显示进度
+                                percentage = (copied / file_size) * 100
+                                print(f"\rCopying {os.path.basename(src)}: {copied/1024/1024:.1f}MB/{file_size/1024/1024:.1f}MB ({percentage:.1f}%)", 
+                                      end="", flush=True)
+            except PermissionError as pe:
+                print(f"\nPermission denied when copying {src}: {pe}")
+                return False
+            except OSError as oe:
+                print(f"\nOS error when copying {src}: {oe}")
+                return False
             
             # 复制完成后恢复文件时间戳
-            shutil.copystat(src, dst)
+            try:
+                shutil.copystat(src, dst)
+            except Exception:
+                # 时间戳复制失败不影响主要功能
+                pass
             
             if file_size > 1024 * 1024:
                 print()  # 换行
@@ -281,6 +351,11 @@ class FileSync:
         target_path = self.get_target_path(server_path)
         
         try:
+            # 检查是否需要跳过此文件
+            if self._should_skip_file(server_path):
+                print(f"Skipped file (permission/access issue): {server_path}")
+                return True  # 返回True表示已处理，但实际跳过
+            
             # 确保目标目录存在
             target_dir = os.path.dirname(target_path)
             os.makedirs(target_dir, exist_ok=True)
@@ -305,6 +380,11 @@ class FileSync:
         target_path = self.get_target_path(server_path)
         
         try:
+            # 检查是否需要跳过此文件
+            if self._should_skip_file(server_path):
+                print(f"Skipped file (permission/access issue): {server_path}")
+                return True  # 返回True表示已处理，但实际跳过
+            
             # 检查源文件是否存在
             if not os.path.exists(server_path):
                 print(f"Source file not found: {server_path}")
@@ -377,6 +457,35 @@ class FileSync:
                 print(f"Fallback failed: {fallback_e}")
                 return False
     
+    def _decode_file_path(self, encoded_path):
+        """解码文件路径，处理特殊字符"""
+        try:
+            # 如果路径包含URL编码的字符，进行解码
+            import urllib.parse
+            decoded_path = urllib.parse.unquote(encoded_path)
+            
+            # 确保路径使用正确的路径分隔符
+            if os.sep == '\\':  # Windows系统
+                decoded_path = decoded_path.replace('/', '\\')
+            else:  # Unix系统
+                decoded_path = decoded_path.replace('\\', '/')
+            
+            return decoded_path
+        except Exception as e:
+            print(f"Error decoding path {encoded_path}: {e}")
+            return encoded_path
+    
+    def _encode_file_path(self, file_path):
+        """编码文件路径，处理特殊字符"""
+        try:
+            # 对路径进行URL编码，处理特殊字符
+            import urllib.parse
+            encoded_path = urllib.parse.quote(file_path, safe='')
+            return encoded_path
+        except Exception as e:
+            print(f"Error encoding path {file_path}: {e}")
+            return file_path
+    
     def handle_message(self, message):
         """处理来自服务端的消息"""
         try:
@@ -387,8 +496,18 @@ class FileSync:
                 return False
             
             event_type = parts[0]
-            file_path = parts[1]
-            old_file_path = parts[2] if len(parts) > 2 else None
+            encoded_file_path = parts[1]
+            encoded_old_file_path = parts[2] if len(parts) > 2 else None
+            
+            # 解码文件路径
+            file_path = self._decode_file_path(encoded_file_path)
+            old_file_path = self._decode_file_path(encoded_old_file_path) if encoded_old_file_path else None
+            
+            # 对于CREATE和MODIFY事件，验证源文件是否存在
+            if event_type in ['CREATE', 'MODIFY']:
+                if not os.path.exists(file_path):
+                    print(f"Source file not found: {file_path}")
+                    return False
             
             # 处理不同类型的事件
             if event_type == 'CREATE':
@@ -397,11 +516,15 @@ class FileSync:
                 return self.sync_modify(file_path)
             elif event_type == 'DELETE':
                 return self.sync_delete(file_path)
-            elif event_type == 'RENAME' and old_file_path:
-                return self.sync_rename(old_file_path, file_path)
+            elif event_type == 'RENAME':
+                if old_file_path:
+                    return self.sync_rename(file_path, old_file_path)  # 修复参数顺序：file_path是旧路径，old_file_path是新路径
+                else:
+                    print(f"RENAME event missing old file path: {message}")
+                    return False
             else:
                 print(f"Unknown event type: {event_type}")
                 return False
         except Exception as e:
-            print(f"Error handling message '{message}': {e}")
+            print(f"Failed to handle message '{message}': {e}")
             return False

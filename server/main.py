@@ -19,19 +19,34 @@ class FileSyncServer:
             self.handle_file_event
         )
     
+    def _encode_file_path(self, file_path):
+        """编码文件路径，处理特殊字符"""
+        try:
+            # 对路径进行URL编码，处理特殊字符
+            import urllib.parse
+            encoded_path = urllib.parse.quote(file_path, safe='')
+            return encoded_path
+        except Exception as e:
+            print(f"Error encoding path {file_path}: {e}")
+            return file_path
+    
     def handle_file_event(self, event_type, file_path, new_file_path=None):
         """处理文件事件并广播给客户端"""
         # 格式化事件信息
         timestamp = ""  # 可以添加时间戳
         print(f"[{timestamp}] {event_type}: {file_path}")
         
-        if event_type == 'RENAME' and new_file_path:
+        # 编码文件路径，处理特殊字符
+        encoded_file_path = self._encode_file_path(file_path)
+        encoded_new_file_path = self._encode_file_path(new_file_path) if new_file_path else None
+        
+        if event_type == 'RENAME' and encoded_new_file_path:
             print(f"  -> {new_file_path}")
             # 构造重命名事件消息
-            message = f"{event_type}|{file_path}|{new_file_path}"
+            message = f"{event_type}|{encoded_file_path}|{encoded_new_file_path}"
         else:
             # 构造其他事件消息
-            message = f"{event_type}|{file_path}"
+            message = f"{event_type}|{encoded_file_path}"
         
         # 向所有客户端广播消息
         self.tcp_server.broadcast(message)
